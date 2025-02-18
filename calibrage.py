@@ -11,31 +11,55 @@ import re
 from bs4 import BeautifulSoup
 import requests
 import io
+import platform
 
 def setup_chrome_driver():
     """
-    Set up and return a Chrome WebDriver with automatic ChromeDriver installation
+    Set up and return a Chrome WebDriver with additional options for cloud environment
     """
     try:
         options = webdriver.ChromeOptions()
         options.add_argument("--start-maximized")
         options.add_argument("--headless")
         
-        # Use webdriver_manager to automatically install and manage ChromeDriver
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        return driver
-    except Exception as e:
-        st.error(f"Error setting up ChromeDriver: {str(e)}")
-        st.info("Installing ChromeDriver automatically...")
+        # Additional options for cloud environment
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-features=NetworkService")
+        options.add_argument("--window-size=1920x1080")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--dns-prefetch-disable")
+        options.add_argument("--disable-infobars")
+        
         try:
-            # Force reinstall ChromeDriver
+            # First attempt: Use ChromeDriverManager
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
             return driver
         except Exception as e:
-            st.error(f"Failed to install ChromeDriver: {str(e)}")
-            return None
+            st.warning(f"ChromeDriverManager installation failed, trying alternative method: {str(e)}")
+            
+            try:
+                # Second attempt: Try direct Chrome instantiation
+                driver = webdriver.Chrome(options=options)
+                return driver
+            except Exception as e:
+                st.error(f"Direct Chrome instantiation failed: {str(e)}")
+                
+                try:
+                    # Third attempt: Try with default Service
+                    service = Service()
+                    driver = webdriver.Chrome(service=service, options=options)
+                    return driver
+                except Exception as e:
+                    st.error(f"All Chrome initialization attempts failed: {str(e)}")
+                    return None
+                    
+    except Exception as e:
+        st.error(f"Error in setup_chrome_driver: {str(e)}")
+        return None
 
 def extract_data(xpath, driver):
     """
@@ -73,54 +97,61 @@ def scrape_google_maps(search_query, driver):
         scroll_attempts = 0
         
         while scroll_attempts < max_scrolls:
-            # Scroll down to load more results
-            scrollable_div = driver.find_element(By.XPATH, '//div[contains(@aria-label, "Results for")]')
-            driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable_div)
-            time.sleep(3)  # Wait for new results to load
-            
-            # Collect all visible listings
-            current_listings = driver.find_elements(By.XPATH, '//a[contains(@href, "https://www.google.com/maps/place")]')
-            current_count = len(current_listings)
-            
-            # Add new listings to the set
-            for listing in current_listings:
-                href = listing.get_attribute("href")
-                if href:
-                    all_listings.add(href)
-            
-            # Check if no new results were loaded
-            if current_count == previous_count:
+            try:
+                # Scroll down to load more results
+                scrollable_div = driver.find_element(By.XPATH, '//div[contains(@aria-label, "Results for")]')
+                driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable_div)
+                time.sleep(3)  # Wait for new results to load
+                
+                # Collect all visible listings
+                current_listings = driver.find_elements(By.XPATH, '//a[contains(@href, "https://www.google.com/maps/place")]')
+                current_count = len(current_listings)
+                
+                # Add new listings to the set
+                for listing in current_listings:
+                    href = listing.get_attribute("href")
+                    if href:
+                        all_listings.add(href)
+                
+                # Check if no new results were loaded
+                if current_count == previous_count:
+                    break
+                
+                # Update the previous count
+                previous_count = current_count
+                scroll_attempts += 1
+            except Exception as e:
+                st.warning(f"Error during scrolling: {str(e)}")
                 break
-            
-            # Update the previous count
-            previous_count = current_count
-            scroll_attempts += 1
         
         # Extract details for each unique listing
         results = []
         for i, href in enumerate(all_listings):
-            driver.get(href)
-            time.sleep(3)  # Wait for the sidebar to load
-            
-            # Extract details
-            name = extract_data('//h1[contains(@class, "DUwDvf lfPIob")]', driver)
-            address = extract_data('//button[@data-item-id="address"]//div[contains(@class, "fontBodyMedium")]', driver)
-            phone = extract_data('//button[contains(@data-item-id, "phone:tel:")]//div[contains(@class, "fontBodyMedium")]', driver)
-            website = extract_data('//a[@data-item-id="authority"]//div[contains(@class, "fontBodyMedium")]', driver)
-            
-            # Append to results
-            results.append({
-                "Name": name,
-                "Address": address,
-                "Phone Number": phone,
-                "Website": website
-            })
+            try:
+                driver.get(href)
+                time.sleep(3)  # Wait for the sidebar to load
+                
+                # Extract details
+                name = extract_data('//h1[contains(@class, "DUwDvf lfPIob")]', driver)
+                address = extract_data('//button[@data-item-id="address"]//div[contains(@class, "fontBodyMedium")]', driver)
+                phone = extract_data('//button[contains(@data-item-id, "phone:tel:")]//div[contains(@class, "fontBodyMedium")]', driver)
+                website = extract_data('//a[@data-item-id="authority"]//div[contains(@class, "fontBodyMedium")]', driver)
+                
+                # Append to results
+                results.append({
+                    "Name": name,
+                    "Address": address,
+                    "Phone Number": phone,
+                    "Website": website
+                })
+            except Exception as e:
+                st.warning(f"Error processing listing {i+1}: {str(e)}")
+                continue
         
-        # Return results as a DataFrame
-        return pd.DataFrame(results)
+        return pd.DataFrame(results) if results else None
     
     except Exception as e:
-        print(f"Error occurred: {e}")
+        st.error(f"Error in scrape_google_maps: {str(e)}")
         return None
 
 def extract_emails_from_text(text):
@@ -220,28 +251,46 @@ def main():
         
         placeholder.markdown("**Processing..... Please Wait**")
         
-        # Initialize Chrome driver with automatic installation
-        driver = setup_chrome_driver()
-        
-        if driver is None:
-            st.error("Failed to initialize Chrome driver. Please make sure Chrome browser is installed on your system.")
-            return
-        
+        # Check system requirements
         try:
-            df = scrape_google_maps(search_query, driver)
-            driver.quit()
+            system_info = f"System: {platform.system()}, Release: {platform.release()}"
+            st.info(f"Running on: {system_info}")
+        except:
+            pass
             
-            if df is not None:
+        # Initialize Chrome driver with automatic installation
+        driver = None
+        try:
+            driver = setup_chrome_driver()
+            
+            if driver is None:
+                st.error("""
+                Failed to initialize Chrome driver. This could be due to:
+                1. Chrome browser not installed
+                2. Running in a restricted environment
+                3. System compatibility issues
+                
+                Please ensure Chrome is installed and try running locally if possible.
+                """)
+                return
+            
+            df = scrape_google_maps(search_query, driver)
+            
+            if df is not None and not df.empty:
                 # Process websites and emails
                 websites = df["Website"].tolist()
                 email_results = []
+                
                 for website in websites:
                     if website != "N/A" and isinstance(website, str) and website.strip():
                         urls_to_try = [f"http://{website}", f"https://{website}"]
                         emails_found = []
                         for url in urls_to_try:
-                            emails = scrape_website_for_emails(url)
-                            emails_found.extend(emails)
+                            try:
+                                emails = scrape_website_for_emails(url)
+                                emails_found.extend(emails)
+                            except Exception as e:
+                                st.warning(f"Error scraping emails from {url}: {str(e)}")
                         email_results.append(", ".join(set(emails_found)) if emails_found else "N/A")
                     else:
                         email_results.append("N/A")
@@ -249,23 +298,33 @@ def main():
                 df["Email"] = email_results
                 
                 # Save to Excel
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                    df.to_excel(writer, index=False)
-                output.seek(0)
+                try:
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        df.to_excel(writer, index=False)
+                    output.seek(0)
+                    
+                    placeholder.empty()
+                    st.success("Done! 👇Click Download Button Below")
+                    st.download_button(
+                        label="Download Results",
+                        data=output,
+                        file_name="final_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                except Exception as e:
+                    st.error(f"Error saving results: {str(e)}")
+            else:
+                st.warning("No results found for the given search query.")
                 
-                placeholder.empty()
-                st.success("Done! 👇Click Download Button Below")
-                st.download_button(
-                    label="Download Results",
-                    data=output,
-                    file_name="final_results.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
         except Exception as e:
             st.error(f"An error occurred during scraping: {str(e)}")
+        finally:
             if driver:
-                driver.quit()
+                try:
+                    driver.quit()
+                except:
+                    pass
 
 if __name__ == "__main__":
     main()
